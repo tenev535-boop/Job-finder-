@@ -400,6 +400,7 @@ function JobCard({ job, analysis, onDraft, onSkip, drafting }) {
           <div className="flex flex-wrap items-center gap-1.5">
             <Pill className={legalStyle(tag)}>🛡️ {tag}</Pill>
             <Pill className="bg-slate-100 text-slate-600 border-slate-200">{job.job_type}</Pill>
+            {job.source && job.source !== "sample" && <Pill className="bg-slate-100 text-slate-500 border-slate-200">{job.source}</Pill>}
           </div>
           <h3 className="mt-2 text-base font-bold leading-tight text-slate-900">{job.title}</h3>
           <p className="text-sm text-slate-600">
@@ -461,6 +462,11 @@ function JobCard({ job, analysis, onDraft, onSkip, drafting }) {
         <Button variant="ghost" onClick={() => onSkip(job)} className="flex-1 border border-slate-200">
           Skip
         </Button>
+        {job.url && (
+          <a href={job.url} target="_blank" rel="noopener noreferrer" className="inline-flex flex-1 items-center justify-center rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+            Open ↗
+          </a>
+        )}
         <Button onClick={() => onDraft(job)} loading={drafting} className="flex-[2]" variant={blocked ? "secondary" : "primary"}>
           {analysis ? "✨ View draft" : "✨ Draft & Apply"}
         </Button>
@@ -469,7 +475,7 @@ function JobCard({ job, analysis, onDraft, onSkip, drafting }) {
   );
 }
 
-function FinderTab({ profile, jobs, loading, error, onReload, analyses, onDraft, onSkip, draftingId, skippedCount, onResetSkipped, onScoreAll, scoringAll }) {
+function FinderTab({ profile, jobs, feedInfo, loading, error, onReload, analyses, onDraft, onSkip, draftingId, skippedCount, onResetSkipped, onScoreAll, scoringAll }) {
   const profileEmpty = !profile.subjects.length && !profile.hobbies.length && !profile.strengths.length;
   return (
     <div className="space-y-3">
@@ -478,9 +484,14 @@ function FinderTab({ profile, jobs, loading, error, onReload, analyses, onDraft,
           <strong>Tip:</strong> fill in your subjects and hobbies in the <em>CV &amp; Invite</em> tab to unlock personalised match scores.
         </div>
       )}
+      {!loading && !error && !feedInfo.live && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          Showing built-in example jobs. No live job board answered. Add an Adzuna key or check the backend's network access to see real listings.
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <p className="text-xs text-slate-500">
-          {loading ? "Finding safe local jobs…" : `${jobs.length} student-safe job${jobs.length === 1 ? "" : "s"}`}
+          {loading ? "Finding safe local jobs…" : `${jobs.length} student-safe job${jobs.length === 1 ? "" : "s"}${feedInfo.live ? " · live" : ""}`}
           {skippedCount > 0 && (
             <>
               {" "}
@@ -803,6 +814,11 @@ function MonitorTab({ applications, setApplications, analyses, onToast }) {
                   <div className="flex gap-1.5">
                     {analysis?.invitation_message && <CopyButton text={analysis.invitation_message} label="Message" onCopied={() => onToast("Message copied", "success")} />}
                     {analysis?.cv_profile && <CopyButton text={analysis.cv_profile} label="CV" onCopied={() => onToast("CV profile copied", "success")} />}
+                    {app.url && (
+                      <a href={app.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                        Open ↗
+                      </a>
+                    )}
                   </div>
                   <button type="button" onClick={() => remove(app.id)} className="text-xs font-semibold text-rose-600">
                     Remove
@@ -834,6 +850,7 @@ export default function App() {
   const [skipped, setSkipped] = usePersistentState(STORAGE_KEYS.skipped, []);
 
   const [jobs, setJobs] = useState([]);
+  const [feedInfo, setFeedInfo] = useState({ live: false, sources: {} });
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
   const [draftingId, setDraftingId] = useState(null);
@@ -861,7 +878,8 @@ export default function App() {
           strengths: profile.strengths.join(","),
         },
       });
-      setJobs(data);
+      setJobs(data.jobs);
+      setFeedInfo({ live: data.live, sources: data.sources });
     } catch (err) {
       setJobsError(err.message);
     } finally {
@@ -956,6 +974,7 @@ export default function App() {
         title: job.title,
         company: job.company,
         match_score: entry.analysis.match_score,
+        url: job.url || "",
         status: "applied",
         applied_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -996,6 +1015,7 @@ export default function App() {
             <FinderTab
               profile={profile}
               jobs={visibleJobs}
+              feedInfo={feedInfo}
               loading={jobsLoading}
               error={jobsError}
               onReload={loadJobs}

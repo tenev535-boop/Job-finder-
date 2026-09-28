@@ -2,6 +2,8 @@
 
 A mobile-first web app that helps **16-year-old high-school students** find a safe first job, write an honest ATS-friendly CV profile, message a recruiter politely, and track every application.
 
+**Live version (no server needed):** <https://claude.ai/artifact/81ooeGp29ygpGgrhsBiUzR> — the single-file page in `live/firstshift.html`, hosted on claude.ai. It opens real job boards (Indeed, Google Jobs, Adzuna, Snagajob, Reed, SEEK, Job Bank), lets a student paste any listing for the safety check, and uses the viewer's own Claude account for scoring, CV and message writing. Share it from the page's Share menu.
+
 Every job passes two gates before a student sees a "Draft & Apply" button:
 
 1. **Deterministic labour-law pre-screen** (no AI): night shifts, early starts, over-hours, hazardous work, age-restricted environments and full-time roles are blocked or flagged *Needs Review*.
@@ -22,7 +24,11 @@ Every job passes two gates before a student sees a "Draft & Apply" button:
 
 | Path | What it is |
 |---|---|
-| `backend/main.py` | FastAPI app, labour-law rules, sample job feed, Claude system prompt, structured-output schemas |
+| `backend/main.py` | FastAPI app, labour-law rules, Claude system prompt, structured-output schemas |
+| `backend/job_sources.py` | Real job-board fetchers (Adzuna, Arbeitnow, The Muse, Jobicy, Remotive) with caching and de-duplication |
+| `live/firstshift.html` | Serverless single-page version published as a Claude artifact |
+| `render.yaml`, `backend/Dockerfile` | Free-tier backend deploy (Render) or any container host |
+| `.github/workflows/pages.yml` | Builds the React frontend to GitHub Pages on every push to main |
 | `backend/requirements.txt` | Python dependencies |
 | `backend/.env.example` | Environment variables (copy to `backend/.env`) |
 | `frontend/src/App.jsx` | The entire mobile UI in one React component (Tailwind utility classes) |
@@ -108,7 +114,19 @@ Response:
 
 `POST /api/generate-assets` takes `{ "profile": {...}, "target_role": "…" }` and returns `cv_profile`, `key_skills`, `invitation_message` and `cv_sections`.
 
-`GET /api/jobs?subjects=Maths,PE&hobbies=Football&location=Northside` returns the pre-screened feed with a cheap keyword `quick_match`. Add `include_blocked=true` to see jobs that failed the safety check.
+`GET /api/jobs?subjects=Maths,PE&hobbies=Football&location=Leeds&country=gb&query=weekend` returns `{ jobs, sources, live }`: the pre-screened live feed with a cheap keyword `quick_match`, a per-source status map, and `live: false` when every board failed and the built-in sample jobs were served instead. Add `include_blocked=true` to see jobs that failed the safety check.
+
+## Real job sources
+
+| Source | Key needed | What you get |
+|---|---|---|
+| [Adzuna](https://developer.adzuna.com) | Free app id + key | **Local** part-time listings in 16+ countries (`JOB_COUNTRY`). The best source for teen jobs. |
+| Arbeitnow | None | Europe-heavy board with part-time and student roles |
+| The Muse | None | Internships and entry-level roles, filterable by city |
+| Jobicy | None | Remote part-time roles |
+| Remotive | None | Remote roles |
+
+All sources run in parallel, results are cached for 15 minutes and filtered by student-friendly terms before the labour-law pre-screen. Restrict them with `JOB_SOURCES=adzuna,arbeitnow`. Each card links to the original listing.
 
 ## Configuration
 
@@ -127,8 +145,16 @@ The AI calls use structured outputs (Pydantic schema enforced by the API), promp
 
 Rules live in `LABOR_RULES` in `backend/main.py` and are deliberately conservative (no work after 22:00 or before 07:00, max 20 h/week in term, hazardous-keyword block list, age gates). **They are not legal advice** — check the youth-employment rules for your country/state and adjust the constants. The deterministic screen can only make an AI verdict stricter, never looser.
 
-## Production notes
+## Deploy for free
 
-- Replace `SAMPLE_JOBS` with a real feed (job-board API, scraper or database) — the pre-screen and scoring work on any `Job` object.
-- `npm run build` outputs a static bundle in `frontend/dist/`; serve it from any static host with `VITE_API_BASE` set to your backend URL and that origin added to `ALLOWED_ORIGINS`.
-- Run the backend with `uvicorn main:app --host 0.0.0.0 --port 8000` behind HTTPS. Keep the API key on the server only; the browser never talks to Anthropic directly.
+**Backend on Render (free tier)**
+1. Push this repo to GitHub.
+2. In the [Render dashboard](https://dashboard.render.com) choose *New → Blueprint* and pick the repo. `render.yaml` sets everything up.
+3. Paste your `ANTHROPIC_API_KEY` (and Adzuna keys if you have them). The API comes up at `https://firstshift-api.onrender.com`. Free instances sleep after 15 minutes idle, so the first request can take 30-60 s.
+
+**Frontend on GitHub Pages (free)**
+1. Repo *Settings → Pages → Source: GitHub Actions*.
+2. Add a repository secret `VITE_API_BASE` with your backend URL plus `/api`, e.g. `https://firstshift-api.onrender.com/api`.
+3. Push to `main`. The workflow in `.github/workflows/pages.yml` builds and publishes to `https://<user>.github.io/<repo>/`. Add that origin to `ALLOWED_ORIGINS` on the backend.
+
+Any container host works too: `docker build -t firstshift backend && docker run -p 8000:8000 -e ANTHROPIC_API_KEY=... firstshift`. Keep the API key on the server only; the browser never talks to Anthropic directly.

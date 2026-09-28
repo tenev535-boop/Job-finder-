@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import anthropic
+import job_sources
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +48,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = os.getenv("CLAUDE_EFFORT", "medium")
 MAX_OUTPUT_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
+JOB_COUNTRY = os.getenv("JOB_COUNTRY", "gb")  # Adzuna country code: gb, us, ca, au, de, fr, ...
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
@@ -109,6 +111,8 @@ class Job(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     posted_at: str = ""
+    url: str = Field(default="", description="Link to the original listing")
+    source: str = Field(default="sample", description="Which job board it came from")
 
 
 class PrescreenResult(BaseModel):
@@ -279,9 +283,9 @@ def prescreen_job(job: Job) -> PrescreenResult:
     if start is not None and start < earliest_start:
         blocked = True
         reasons.append(f"Shift starts before {LABOR_RULES['earliest_start_hour']}:00 AM")
-    if start is None or end is None:
+    if end is None:
         review = True
-        reasons.append("Shift times not listed - confirm they finish by 10 PM")
+        reasons.append("Finish time not listed - confirm shifts end by 10 PM")
 
     if job.hours_per_week is not None:
         if job.hours_per_week > LABOR_RULES["max_hours_per_week_break"]:
@@ -480,16 +484,27 @@ def health() -> dict:
     }
 
 
-@app.get("/api/jobs", response_model=list[JobCard])
-def list_jobs(
+class JobFeed(BaseModel):
+    jobs: list[JobCard]
+    sources: dict[str, str]
+    live: bool = Field(description="False when the feed fell back to the built-in sample jobs")
+
+
+@app.get("/api/jobs", response_model=JobFeed)
+async def list_jobs(
     location: str = "",
     subjects: str = "",
     hobbies: str = "",
     strengths: str = "",
+    query: str = "",
+    country: str = "",
     include_blocked: bool = False,
-) -> list[JobCard]:
-    """Local job feed with the labour-law pre-screen and a cheap keyword match applied.
+) -> JobFeed:
+    """Live job feed from real job boards, pre-screened for 16-year-olds.
 
+    Sources are configured in job_sources.py (Adzuna needs a free API key; the
+    others need none).  When every source fails or returns nothing, the
+    built-in sample jobs are served so the app still works offline.
     Query params are comma-separated so the frontend can call this before the
     full profile has been saved.
     """
@@ -499,14 +514,17 @@ def list_jobs(
         hobbies=[s for s in hobbies.split(",") if s.strip()],
         strengths=[s for s in strengths.split(",") if s.strip()],
     )
+    raw, status = await job_sources.fetch_all(query=query, location=location, country=country or JOB_COUNTRY)
+    live = bool(raw)
+    jobs = [Job(**r) for r in raw] if raw else SAMPLE_JOBS
     cards: list[JobCard] = []
-    for job in SAMPLE_JOBS:
+    for job in jobs:
         screen = prescreen_job(job)
         if screen.verdict == "blocked" and not include_blocked:
             continue
         cards.append(JobCard(**job.model_dump(), prescreen=screen, quick_match=quick_match(profile, job)))
     cards.sort(key=lambda c: (c.prescreen.verdict != "approved", -c.quick_match))
-    return cards
+    return JobFeed(jobs=cards, sources=status if live else {"sample": f"{len(SAMPLE_JOBS)} built-in jobs (no live source answered)"}, live=live)
 
 
 @app.post("/api/process-job", response_model=ProcessJobResponse)
