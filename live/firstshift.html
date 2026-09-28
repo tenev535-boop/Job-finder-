@@ -191,7 +191,7 @@
   /* ------------------------------------------------------------------ */
   /* Storage (per viewer, per browser)                                   */
   /* ------------------------------------------------------------------ */
-  const K = { profile: "fs.profile", jobs: "fs.jobs", analyses: "fs.analyses", apps: "fs.apps", skipped: "fs.skipped", tab: "fs.tab", search: "fs.search" };
+  const K = { profile: "fs.profile", jobs: "fs.jobs", analyses: "fs.analyses", apps: "fs.apps", skipped: "fs.skipped", tab: "fs.tab", search: "fs.search", apiKey: "fs.apiKey" };
   function load(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch (e) { return fb; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 
@@ -220,7 +220,8 @@
     monitorFilter: "all",
     showAdd: false,
     sheet: null,      // { jobId, phase: "thinking"|"done"|"error", text, error }
-    sample: undefined // undefined = not resolved yet, null = unavailable
+    sample: undefined, // undefined = not resolved yet, null = unavailable
+    apiKey: load(K.apiKey, "")
   };
 
   /* ------------------------------------------------------------------ */
@@ -368,6 +369,8 @@ Reply with ONLY a JSON object of this exact shape:
     };
   }
   const ERR_COPY = {
+    bad_key: "That API key was rejected. Check it in AI settings.",
+    invalid_request: "The AI request was rejected. Try a shorter job ad.",
     not_granted: "Claude is not allowed for this page yet. Allow it when asked, or use the pre-screen and job links without AI.",
     sampling_disabled: "Claude is not available on this account.", rate_limited: "Too many requests right now. Wait a minute and try again.",
     session_expired: "Please sign in to Claude again.", refused: "Claude could not process this posting. Try editing the text.",
@@ -375,6 +378,42 @@ Reply with ONLY a JSON object of this exact shape:
     prompt_too_large: "That job ad is too long. Paste a shorter section.", cancelled: ""
   };
   function errCopy(e) { return (e && ERR_COPY[e.code] !== undefined) ? ERR_COPY[e.code] : "Something went wrong talking to Claude. Try again in a moment."; }
+
+  const JOB_SCHEMA = { type: "object", additionalProperties: false, required: ["match_score", "match_reasons", "legal", "cv_profile", "key_skills", "invitation_message", "recommendation"], properties: {
+    match_score: { type: "integer", minimum: 0, maximum: 100 }, match_reasons: { type: "array", items: { type: "string" } },
+    legal: { type: "object", additionalProperties: false, required: ["is_safe_for_16", "tag", "concerns", "schedule_fit"], properties: { is_safe_for_16: { type: "boolean" }, tag: { type: "string" }, concerns: { type: "array", items: { type: "string" } }, schedule_fit: { type: "string" } } },
+    cv_profile: { type: "string" }, key_skills: { type: "array", items: { type: "string" } }, invitation_message: { type: "string" }, recommendation: { type: "string", enum: ["apply", "apply_with_caution", "skip"] } } };
+  const ASSETS_SCHEMA = { type: "object", additionalProperties: false, required: ["cv_profile", "key_skills", "invitation_message", "cv_sections"], properties: {
+    cv_profile: { type: "string" }, key_skills: { type: "array", items: { type: "string" } }, invitation_message: { type: "string" },
+    cv_sections: { type: "object", additionalProperties: false, required: ["Education", "Skills", "Activities & Achievements"], properties: { "Education": { type: "array", items: { type: "string" } }, "Skills": { type: "array", items: { type: "string" } }, "Activities & Achievements": { type: "array", items: { type: "string" } } } } } };
+
+  function aiMode() { return state.sample ? "viewer" : (state.apiKey ? "key" : null); }
+
+  /* Direct call to the Claude API from the browser: used only when the page is
+     hosted outside Claude (e.g. GitHub Pages) and the site owner pasted a key. */
+  async function directClaudeJson(prompt, schema, opts) {
+    let res;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", signal: opts && opts.signal,
+        headers: { "content-type": "application/json", "x-api-key": state.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({ model: "claude-opus-5-5", max_tokens: 4096, messages: [{ role: "user", content: prompt }], output_config: { format: { type: "json_schema", schema: schema } } })
+      });
+    } catch (e) { throw { code: (e && e.name === "AbortError") ? "cancelled" : "upstream_error", message: String(e) }; }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw { code: res.status === 401 ? "bad_key" : res.status === 429 ? "rate_limited" : res.status === 400 ? "invalid_request" : "upstream_error", message: body.slice(0, 300) };
+    }
+    const data = await res.json();
+    if (data.stop_reason === "refusal") throw { code: "refused", message: "refusal" };
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+    try { return JSON.parse(text); } catch (e) { throw { code: "invalid_json", message: "parse", text }; }
+  }
+  async function askJson(prompt, schema, opts) {
+    if (state.sample) return state.sample.json(prompt, opts);
+    if (state.apiKey) return directClaudeJson(prompt, schema, opts);
+    throw { code: "not_granted", message: "no AI available" };
+  }
 
   async function resolveSample() {
     try { state.sample = (window.claude && typeof window.claude.use === "function") ? await window.claude.use("sample") : null; }
@@ -422,9 +461,21 @@ Reply with ONLY a JSON object of this exact shape:
   }
 
   function aiBanner() {
-    if (state.sample === undefined) return "";
-    if (state.sample === null) return `<div class="note warn">AI scoring, CV and message writing need this page open inside Claude. The safety pre-screen, job links and tracker still work here.</div>`;
-    return "";
+    if (state.sample !== null) return "";
+    if (state.apiKey) return "";
+    return `<div class="note warn">AI scoring, CV and message writing are off. The safety check, job links and tracker still work. Add a Claude API key in <b>AI settings</b> below, or open this page inside Claude.</div>`;
+  }
+  function aiSettingsCard() {
+    if (state.sample !== null) return "";
+    return `<section class="card stack"><details ${state.apiKey ? "" : "open"}><summary>⚙️ AI settings ${state.apiKey ? "· key saved" : ""}</summary>
+      <p class="small muted" style="margin:8px 0">For the person running this site: paste an Anthropic API key from console.anthropic.com. It is stored only in this browser and sent only to api.anthropic.com. Usage is billed to that key.</p>
+      <div class="row" style="flex-wrap:nowrap"><input type="password" id="apiKeyIn" placeholder="sk-ant-…" value="${esc(state.apiKey)}" style="flex:1" autocomplete="off"><button class="btn sm primary" id="apiKeySave">Save</button>${state.apiKey ? `<button class="btn sm outline" id="apiKeyClear">Remove</button>` : ""}</div>
+    </details></section>`;
+  }
+  function bindAiSettings() {
+    const save_ = $("#apiKeySave"); if (!save_) return;
+    save_.onclick = () => { state.apiKey = $("#apiKeyIn").value.trim(); save(K.apiKey, state.apiKey); render(); toast(state.apiKey ? "Key saved in this browser" : "Key removed"); };
+    const clr = $("#apiKeyClear"); if (clr) clr.onclick = () => { state.apiKey = ""; save(K.apiKey, ""); render(); };
   }
 
   function renderFinder() {
@@ -471,10 +522,12 @@ Reply with ONLY a JSON object of this exact shape:
 
       <div class="row between">
         <span class="small muted">${jobs.length} job${jobs.length === 1 ? "" : "s"}${state.skipped.length ? ` · ${state.skipped.length} skipped <button class="btn link sm" id="unskip">undo</button>` : ""}</span>
-        ${state.sample ? `<button class="btn sm outline" id="scoreAll" ${profileEmpty || !jobs.some(j => !j.ai) ? "disabled" : ""}>✨ Score all with AI</button>` : ""}
+        ${aiMode() ? `<button class="btn sm outline" id="scoreAll" ${profileEmpty || !jobs.some(j => !j.ai) ? "disabled" : ""}>✨ Score all with AI</button>` : ""}
       </div>
       ${jobs.length ? jobs.map(jobCard).join("") : `<div class="empty"><div class="big">🎉</div><h3>All caught up</h3><p class="muted small">Search the job sites above and paste anything that looks good.</p></div>`}
+      ${aiSettingsCard()}
     `;
+    bindAiSettings();
 
     $("#sCountry").onchange = e => { state.search.country = e.target.value; save(K.search, state.search); render(); };
     $("#sWhere").oninput = e => { state.search.where = e.target.value; save(K.search, state.search); refreshBoards(); };
@@ -536,10 +589,10 @@ Reply with ONLY a JSON object of this exact shape:
   /* ------------------------------------------------------------------ */
   let ctl = null;
   async function analyze(job) {
-    if (!state.sample) throw { code: "not_granted", message: "unavailable" };
+    if (!aiMode()) throw { code: "not_granted", message: "unavailable" };
     const screen = prescreen(job);
     const ctlLocal = new AbortController(); ctl = ctlLocal;
-    const raw = await state.sample.json(jobPrompt(job, screen), { signal: ctlLocal.signal, onText: ({ text }) => { if (state.sheet && state.sheet.jobId === job.id) { state.sheet.text = text; const t = $("#streamText"); if (t) t.textContent = text.slice(-300); } } });
+    const raw = await askJson(jobPrompt(job, screen), JOB_SCHEMA, { signal: ctlLocal.signal, onText: ({ text }) => { if (state.sheet && state.sheet.jobId === job.id) { state.sheet.text = text; const t = $("#streamText"); if (t) t.textContent = text.slice(-300); } } });
     const a = validAnalysis(raw); if (!a) throw { code: "invalid_json", message: "shape" };
     if (screen.verdict === "blocked" && a.legal.is_safe_for_16) { a.legal.is_safe_for_16 = false; a.legal.tag = "Not for 16"; a.legal.concerns = Array.from(new Set(screen.reasons.concat(a.legal.concerns))); a.recommendation = "skip"; a.match_score = Math.min(a.match_score, 30); }
     state.analyses[job.id] = Object.assign(a, { generated_at: new Date().toISOString() }); save(K.analyses, state.analyses);
@@ -547,7 +600,7 @@ Reply with ONLY a JSON object of this exact shape:
   }
   async function openDraft(job) {
     if (state.analyses[job.id]) { state.sheet = { jobId: job.id, phase: "done" }; render(); return; }
-    if (!state.sample) { toast(state.sample === null ? "Open this page inside Claude to use AI drafting." : "Claude is still loading. Try again in a second."); return; }
+    if (!aiMode()) { toast(state.sample === null ? "Add a Claude API key in AI settings, or open this page inside Claude." : "Claude is still loading. Try again in a second."); return; }
     state.sheet = { jobId: job.id, phase: "thinking", text: "" }; render();
     try { await analyze(job); if (state.sheet && state.sheet.jobId === job.id) state.sheet.phase = "done"; }
     catch (e) { if (state.sheet && state.sheet.jobId === job.id) { if (e.code === "cancelled") state.sheet = null; else { state.sheet.phase = "error"; state.sheet.error = errCopy(e); } } }
@@ -627,7 +680,7 @@ Reply with ONLY a JSON object of this exact shape:
         ${tagInput("achievements", "Achievements & roles", "Awards, responsibilities, things you're proud of")}
       </section>
       <section class="card stack"><label class="f">Type of job you're aiming for<input type="text" id="pRole" value="${esc(p.target_role)}"></label>
-        <button class="btn primary wide" id="genAssets" ${!can || cvBusy || !state.sample ? "disabled" : ""}>${cvBusy ? "Writing your profile…" : "✨ Generate CV & Invite"}</button>
+        <button class="btn primary wide" id="genAssets" ${!can || cvBusy || !aiMode() ? "disabled" : ""}>${cvBusy ? "Writing your profile…" : "✨ Generate CV & Invite"}</button>
         ${cvBusy ? `<button class="btn outline wide" id="stopGen">Stop</button>` : ""}
         ${!can ? `<p class="small muted" style="text-align:center">Add at least one subject, hobby or strength to generate.</p>` : ""}
         ${cvError ? `<div class="note warn">${esc(cvError)}</div>` : ""}
@@ -635,7 +688,9 @@ Reply with ONLY a JSON object of this exact shape:
       <div class="outbox"><div class="row"><b>📄 CV profile</b><button class="btn sm outline" data-copyid="cvOut2">📋 Copy</button></div><textarea class="out" id="cvOut2" placeholder="Your ATS-friendly CV summary will appear here">${esc(a ? a.cv_profile : "")}</textarea>${a && a.key_skills.length ? `<div class="chips">${a.key_skills.map(s => `<span class="tag skill">${esc(s)}</span>`).join("")}</div>` : ""}</div>
       ${a && a.cv_sections ? `<div class="outbox"><div class="row"><b>🧾 CV sections</b><button class="btn sm outline" id="copySections">📋 Copy</button></div>${Object.keys(a.cv_sections).map(k => `<div><span class="eyebrow">${esc(k)}</span><ul class="tight">${(a.cv_sections[k] || []).map(i => `<li>${esc(i)}</li>`).join("")}</ul></div>`).join("")}</div>` : ""}
       <div class="outbox"><div class="row"><b>✉️ Recruiter invitation message</b><button class="btn sm outline" data-copyid="msgOut2">📋 Copy</button></div><textarea class="out" id="msgOut2" placeholder="A polite 4-sentence message to a recruiter will appear here">${esc(a ? a.invitation_message : "")}</textarea><p class="small muted">You can edit the text before copying.</p></div>
+      ${aiSettingsCard()}
     `;
+    bindAiSettings();
     const bind = (id, field) => { $(id).oninput = e => { state.profile[field] = e.target.value; save(K.profile, state.profile); if (field === "name") $("#whoChip").textContent = state.profile.name ? `Hi ${state.profile.name} 👋` : "🛡️ 16+ safe mode"; }; };
     bind("#pName", "name"); bind("#pYear", "school_year"); bind("#pLoc", "location"); bind("#pAvail", "availability"); bind("#pRole", "target_role");
     const addVals = (field, raw) => { const items = String(raw).split(",").map(s => s.trim()).filter(Boolean); if (!items.length) return; items.forEach(i => { if (!state.profile[field].some(v => v.toLowerCase() === i.toLowerCase())) state.profile[field].push(i); }); save(K.profile, state.profile); render(); };
@@ -649,10 +704,10 @@ Reply with ONLY a JSON object of this exact shape:
     $("#genAssets").onclick = generateAssets; const sg = $("#stopGen"); if (sg) sg.onclick = () => { if (ctl) ctl.abort(); };
   }
   async function generateAssets() {
-    if (!state.sample) return; cvBusy = true; cvError = ""; render();
+    if (!aiMode()) return; cvBusy = true; cvError = ""; render();
     const c = new AbortController(); ctl = c;
     try {
-      const raw = await state.sample.json(assetsPrompt(), { signal: c.signal, cache: false });
+      const raw = await askJson(assetsPrompt(), ASSETS_SCHEMA, { signal: c.signal, cache: false });
       if (!raw || typeof raw !== "object") throw { code: "invalid_json" };
       state.assets = { cv_profile: String(raw.cv_profile || ""), key_skills: Array.isArray(raw.key_skills) ? raw.key_skills.map(String) : [], invitation_message: String(raw.invitation_message || ""), cv_sections: (raw.cv_sections && typeof raw.cv_sections === "object") ? raw.cv_sections : null };
       toast("Your CV profile and message are ready");

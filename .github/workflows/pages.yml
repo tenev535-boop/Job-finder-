@@ -1,10 +1,9 @@
-# Builds the React frontend and publishes it to GitHub Pages (free).
-# Settings -> Pages -> Source: "GitHub Actions".  Set the VITE_API_BASE secret
-# to your backend URL, e.g. https://firstshift-api.onrender.com/api
-name: Deploy frontend to GitHub Pages
+# Publishes the standalone app (live/firstshift.html) to GitHub Pages, free,
+# on every push to main. configure-pages enables the Pages site on first run.
+name: Deploy to GitHub Pages
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,30 +13,31 @@ concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run build -- --base=/${{ github.event.repository.name }}/
-        working-directory: frontend
-        env:
-          VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: frontend/dist
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Wrap the page in an HTML skeleton
+        run: |
+          mkdir -p site
+          {
+            printf '%s\n' '<!doctype html>' '<html lang="en">' '<head>' '<meta charset="utf-8">' \
+              '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' \
+              '<meta name="description" content="Safe first-job finder for 16-year-old students: real job boards, a labour-law safety check, CV and recruiter message writing, and an application tracker.">' \
+              '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">' \
+              '<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif;background:#fafafa}img{max-width:100%}[hidden]{display:none!important}</style>' \
+              '</head>' '<body>'
+            cat live/firstshift.html
+            printf '%s\n' '</body>' '</html>'
+          } > site/index.html
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
       - id: deployment
         uses: actions/deploy-pages@v4

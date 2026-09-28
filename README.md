@@ -2,7 +2,7 @@
 
 A mobile-first web app that helps **16-year-old high-school students** find a safe first job, write an honest ATS-friendly CV profile, message a recruiter politely, and track every application.
 
-**Live version (no server needed):** <https://claude.ai/artifact/81ooeGp29ygpGgrhsBiUzR> — the single-file page in `live/firstshift.html`, hosted on claude.ai. It opens real job boards (Indeed, Google Jobs, Adzuna, Snagajob, Reed, SEEK, Job Bank), lets a student paste any listing for the safety check, and uses the viewer's own Claude account for scoring, CV and message writing. Share it from the page's Share menu.
+**Live versions (no server needed):** <https://tenev535-boop.github.io/Job-finder-/> (public, GitHub Pages) and <https://claude.ai/artifact/81ooeGp29ygpGgrhsBiUzR> (Claude artifact). Both are the single-file page in `live/firstshift.html`. It opens real job boards (Indeed, Google Jobs, Adzuna, Snagajob, Reed, SEEK, Job Bank), lets a student paste any listing for the safety check, and uses the viewer's own Claude account for scoring, CV and message writing. Share it from the page's Share menu.
 
 Every job passes two gates before a student sees a "Draft & Apply" button:
 
@@ -28,7 +28,7 @@ Every job passes two gates before a student sees a "Draft & Apply" button:
 | `backend/job_sources.py` | Real job-board fetchers (Adzuna, Arbeitnow, The Muse, Jobicy, Remotive) with caching and de-duplication |
 | `live/firstshift.html` | Serverless single-page version published as a Claude artifact |
 | `render.yaml`, `backend/Dockerfile` | Free-tier backend deploy (Render) or any container host |
-| `.github/workflows/pages.yml` | Builds the React frontend to GitHub Pages on every push to main |
+| `.github/workflows/pages.yml` | Publishes `live/firstshift.html` to GitHub Pages on every push to main |
 | `backend/requirements.txt` | Python dependencies |
 | `backend/.env.example` | Environment variables (copy to `backend/.env`) |
 | `frontend/src/App.jsx` | The entire mobile UI in one React component (Tailwind utility classes) |
@@ -152,9 +152,10 @@ Rules live in `LABOR_RULES` in `backend/main.py` and are deliberately conservati
 2. In the [Render dashboard](https://dashboard.render.com) choose *New → Blueprint* and pick the repo. `render.yaml` sets everything up.
 3. Paste your `ANTHROPIC_API_KEY` (and Adzuna keys if you have them). The API comes up at `https://firstshift-api.onrender.com`. Free instances sleep after 15 minutes idle, so the first request can take 30-60 s.
 
-**Frontend on GitHub Pages (free)**
-1. Repo *Settings → Pages → Source: GitHub Actions*.
-2. Add a repository secret `VITE_API_BASE` with your backend URL plus `/api`, e.g. `https://firstshift-api.onrender.com/api`.
-3. Push to `main`. The workflow in `.github/workflows/pages.yml` builds and publishes to `https://<user>.github.io/<repo>/`. Add that origin to `ALLOWED_ORIGINS` on the backend.
+**Standalone app on GitHub Pages (free, public)**
+Every push to `main` runs `.github/workflows/pages.yml`, which wraps `live/firstshift.html` in an HTML skeleton and publishes it to `https://<user>.github.io/<repo>/`. That page needs no backend: job boards open as links, the safety check runs in the browser, and AI features work once the site owner pastes an Anthropic API key under *AI settings* (stored only in that browser, sent only to api.anthropic.com).
+
+**React frontend elsewhere**
+`npm run build` in `frontend/` produces a static bundle in `frontend/dist/`. Host it anywhere with `VITE_API_BASE` set to your backend URL plus `/api`, and add that origin to `ALLOWED_ORIGINS` on the backend.
 
 Any container host works too: `docker build -t firstshift backend && docker run -p 8000:8000 -e ANTHROPIC_API_KEY=... firstshift`. Keep the API key on the server only; the browser never talks to Anthropic directly.
