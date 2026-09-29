@@ -509,6 +509,76 @@ Reply with ONLY a JSON object of this exact shape:
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
     try { return JSON.parse(text); } catch (e) { throw { code: "invalid_json", message: "parse", text }; }
   }
+  const EXTRACT_SCHEMA = { type: "object", additionalProperties: false, required: ["title", "company", "location", "pay", "schedule", "hours_per_week", "shift_end", "job_type", "description"], properties: {
+    title: { type: "string" }, company: { type: "string" }, location: { type: "string" }, pay: { type: "string" }, schedule: { type: "string" },
+    hours_per_week: { type: ["integer", "null"] }, shift_end: { type: ["string", "null"] }, job_type: { type: "string", enum: ["Part-time", "Weekend", "Seasonal", "Internship", "Full-time"] }, description: { type: "string" } } };
+  function extractPrompt(text) {
+    return `Extract the job listing fields from the text below. Keep the original language for title and description. shift_end is the latest finish time mentioned as "HH:MM" (24h) or null; hours_per_week is an integer or null; pay is the wage as written or ""; schedule is the days/hours as written or ""; description is a faithful 100-250 word summary of duties, requirements and conditions (age limits, hours, night work, hazards).
+Reply with ONLY a JSON object: {"title": "", "company": "", "location": "", "pay": "", "schedule": "", "hours_per_week": null, "shift_end": null, "job_type": "Part-time" | "Weekend" | "Seasonal" | "Internship" | "Full-time", "description": ""}
+
+LISTING TEXT:
+${text.slice(0, 14000)}`;
+  }
+  async function fetchListingText(url) {
+    const readers = [
+      { name: "reader", get: async () => { const r = await fetch("https://r.jina.ai/" + url, { headers: { Accept: "text/plain", "X-Return-Format": "text" } }); if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); } },
+      { name: "proxy", get: async () => { const r = await fetch("https://api.allorigins.win/raw?url=" + encodeURIComponent(url)); if (!r.ok) throw new Error("HTTP " + r.status); const html = await r.text(); const doc = new DOMParser().parseFromString(html, "text/html"); doc.querySelectorAll("script,style,noscript,nav,footer,header").forEach(n => n.remove()); const t = (doc.title ? doc.title + "\n" : "") + (doc.body ? doc.body.innerText || doc.body.textContent : ""); return t; } }
+    ];
+    let lastErr;
+    for (const rd of readers) { try { const t = (await rd.get()).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim(); if (t.length > 200) return t; lastErr = new Error("empty"); } catch (e) { lastErr = e; } }
+    throw lastErr || new Error("fetch failed");
+  }
+  function heuristicFields(text, url) {
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    const title = (lines.find(l => l.length > 6 && l.length < 120) || "Job listing").replace(/^title:\s*/i, "");
+    let company = ""; try { company = new URL(url).hostname.replace(/^www\./, ""); } catch (e) { /* ignore */ }
+    return { title, company, location: "", pay: "", schedule: "", hours_per_week: null, shift_end: null, job_type: "Part-time", description: text.slice(0, 6000) };
+  }
+  async function extractFields(text, url) {
+    if (!aiMode()) return heuristicFields(text, url);
+    try {
+      const raw = await askJson(extractPrompt(text), EXTRACT_SCHEMA, { cache: false });
+      if (!raw || typeof raw !== "object" || !raw.title) return heuristicFields(text, url);
+      return { title: String(raw.title), company: String(raw.company || ""), location: String(raw.location || ""), pay: String(raw.pay || ""), schedule: String(raw.schedule || ""), hours_per_week: Number.isFinite(+raw.hours_per_week) && raw.hours_per_week !== null && raw.hours_per_week !== "" ? Math.round(+raw.hours_per_week) : null, shift_end: /^\d{1,2}:\d{2}$/.test(String(raw.shift_end || "")) ? String(raw.shift_end).padStart(5, "0") : null, job_type: ["Part-time", "Weekend", "Seasonal", "Internship", "Full-time"].includes(raw.job_type) ? raw.job_type : "Part-time", description: String(raw.description || "").slice(0, 6000) };
+    } catch (e) { if (e && e.code === "cancelled") throw e; return heuristicFields(text, url); }
+  }
+  function setAddStatus(msg, warn) { const el = $("#addStatus"); if (el) { el.textContent = msg; el.hidden = !msg; el.className = "note" + (warn ? " warn" : ""); } }
+  async function addFromLink() {
+    let url = ($("#aUrl").value || "").trim(); if (!url) { toast("Paste the link to the job first."); $("#aUrl").focus(); return; }
+    if (!/^https?:\/\//i.test(url)) url = "https://" + url; $("#aUrl").value = url;
+    const btn = $("#fetchUrl"); if (btn) btn.disabled = true;
+    try {
+      setAddStatus("Fetching the listing…");
+      let text;
+      try { text = await fetchListingText(url); }
+      catch (e) { setAddStatus("This page could not be fetched from here (the site or this viewer blocks it). Open the link, copy the advert text into the box below, then tap Auto-fill.", true); if (btn) btn.disabled = false; return; }
+      setAddStatus(aiMode() ? "Reading the listing with Claude…" : "Reading the listing…");
+      const f = await extractFields(text, url);
+      fillForm(f); setAddStatus("");
+      const job = buildJobFromForm(); if (!job) { if (btn) btn.disabled = false; return; }
+      job.url = url; state.jobs.unshift(job); save(K.jobs, state.jobs); state.showAdd = false; render();
+      await doEverything(job);
+    } catch (e) { setAddStatus(errCopy(e), true); if (btn) btn.disabled = false; }
+  }
+  async function autoFillFromText() {
+    const text = ($("#aDesc").value || "").trim(); if (text.length < 40) { toast("Paste the whole advert text first."); $("#aDesc").focus(); return; }
+    const btn = $("#extractText"); if (btn) btn.disabled = true;
+    setAddStatus(aiMode() ? "Reading the advert with Claude…" : "Reading the advert…");
+    try { const f = await extractFields(text, ($("#aUrl").value || "").trim()); fillForm(f); setAddStatus(""); toast("Details filled in. Check them, then tap Add & do everything."); }
+    catch (e) { setAddStatus(errCopy(e), true); }
+    if (btn) btn.disabled = false;
+  }
+  function fillForm(f) {
+    const set = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
+    set("#aTitle", f.title); set("#aCompany", f.company); set("#aLocation", f.location); set("#aPay", f.pay); set("#aHours", f.hours_per_week === null ? "" : f.hours_per_week); set("#aEnd", f.shift_end || ""); set("#aType", f.job_type); set("#aDesc", f.description);
+    const sch = $("#aSchedule"); if (sch) sch.value = f.schedule || "";
+  }
+  function buildJobFromForm() {
+    const title = $("#aTitle").value.trim(); if (!title) { toast("Give the job a title first."); $("#aTitle").focus(); return null; }
+    const job = { id: "j-" + Date.now(), title, company: $("#aCompany").value.trim(), location: $("#aLocation").value.trim(), url: $("#aUrl").value.trim(), pay: $("#aPay").value.trim(), hours_per_week: $("#aHours").value ? +$("#aHours").value : null, shift_end: $("#aEnd").value || null, job_type: $("#aType").value, description: $("#aDesc").value.trim().slice(0, 6000), schedule: ($("#aSchedule") ? $("#aSchedule").value.trim() : ""), tags: [], added_at: new Date().toISOString() };
+    if (job.url && !/^https?:\/\//i.test(job.url)) job.url = "https://" + job.url;
+    return job;
+  }
   async function askJson(prompt, schema, opts) {
     if (state.sample) return state.sample.json(prompt, opts);
     if (state.apiKey) return directClaudeJson(prompt, schema, opts);
@@ -612,14 +682,18 @@ Reply with ONLY a JSON object of this exact shape:
       </section>
 
       <section class="card">
-        <div class="row between"><h2 style="margin:0">Paste a job you found</h2><button class="btn sm ${state.showAdd ? "outline" : "primary"}" id="toggleAdd">${state.showAdd ? "Close" : "+ Add job"}</button></div>
+        <div class="row between"><h2 style="margin:0">Add a job you found</h2><button class="btn sm ${state.showAdd ? "outline" : "primary"}" id="toggleAdd">${state.showAdd ? "Close" : "+ Add job"}</button></div>
         <div id="addForm" ${state.showAdd ? "" : "hidden"} class="stack" style="margin-top:10px">
+          <label class="f">Link to the job<span class="hint">Paste the listing URL from Jobs.bg, Indeed or any site. FirstShift fetches it, fills in the details, checks it and drafts your application.</span><input type="url" id="aUrl" placeholder="https://www.jobs.bg/job/…"></label>
+          <button class="btn primary wide" id="fetchUrl">🔗 Fetch link & do everything</button>
+          <div class="note" id="addStatus" hidden></div>
+          <p class="eyebrow" style="text-align:center">or fill in by hand</p>
           <label class="f">Job title *<input type="text" id="aTitle" placeholder="Weekend Sales Assistant"></label>
           <div class="grid2">
             <label class="f">Company<input type="text" id="aCompany" placeholder="Shop or business"></label>
             <label class="f">Location<input type="text" id="aLocation" placeholder="Town"></label>
           </div>
-          <label class="f">Link to the listing<span class="hint">Optional. Lets you reopen it from the card.</span><input type="url" id="aUrl" placeholder="https://"></label>
+          <label class="f">Schedule<input type="text" id="aSchedule" placeholder="Sat & Sun 10:00-16:00"></label>
           <div class="grid2">
             <label class="f">Pay<input type="text" id="aPay" placeholder="$13/hr"></label>
             <label class="f">Hours per week<input type="number" id="aHours" min="1" max="60" placeholder="12"></label>
@@ -629,7 +703,8 @@ Reply with ONLY a JSON object of this exact shape:
             <label class="f">Type<select id="aType"><option>Part-time</option><option>Weekend</option><option>Seasonal</option><option>Internship</option><option>Full-time</option></select></label>
           </div>
           <label class="f">Paste the job ad<span class="hint">The description, duties and schedule. The safety check reads it.</span><textarea id="aDesc" placeholder="Copy the whole advert here"></textarea></label>
-          <button class="btn primary wide" id="saveJob">Check this job</button>
+          <button class="btn outline wide" id="extractText">✨ Auto-fill the fields from the pasted ad</button>
+          <div class="row"><button class="btn outline" id="saveJob" style="flex:1">Just check it</button><button class="btn primary" id="saveDraft" style="flex:2">✨ Add & do everything</button></div>
         </div>
       </section>
 
@@ -649,7 +724,7 @@ Reply with ONLY a JSON object of this exact shape:
     $("#liveSearch").onclick = liveSearch;
     $("#sWhat").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); liveSearch(); } };
     $("#toggleAdd").onclick = () => { state.showAdd = !state.showAdd; render(); if (state.showAdd) $("#aTitle").focus(); };
-    if (state.showAdd) $("#saveJob").onclick = addJobFromForm;
+    if (state.showAdd) { $("#saveJob").onclick = () => addJobFromForm(false); $("#saveDraft").onclick = () => addJobFromForm(true); $("#fetchUrl").onclick = addFromLink; $("#extractText").onclick = autoFillFromText; }
     const un = $("#unskip"); if (un) un.onclick = () => { state.skipped = []; save(K.skipped, state.skipped); render(); };
     const sa = $("#scoreAll"); if (sa) sa.onclick = scoreAll;
     main.querySelectorAll("[data-act]").forEach(el => { el.onclick = () => onJobAction(el.dataset.act, el.dataset.id, el); });
@@ -663,8 +738,8 @@ Reply with ONLY a JSON object of this exact shape:
       <div class="head">
         <div class="info">
           <div class="row"><span class="tag ${cls}">🛡️ ${esc(tag)}</span><span class="tag plain">${esc(job.job_type || "Part-time")}</span>${job.example ? `<span class="tag plain">Example</span>` : ""}${job.source ? `<span class="tag plain">${esc(LIVE_SOURCES[job.source] ? LIVE_SOURCES[job.source].name : job.source)}</span>` : ""}</div>
-          <h3>${esc(job.title)}</h3>
-          <p class="company">${esc(job.company || "Company not given")}${job.location ? ` · ${esc(job.location)}` : ""}</p>
+          <h3>${job.url ? `<a href="${esc(job.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(job.title)} ↗</a>` : esc(job.title)}</h3>
+          <p class="company">${esc(job.company || "Company not given")}${job.location ? ` · ${esc(job.location)}` : ""}${job.url ? ` · <a href="${esc(job.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(job.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0])}</a>` : ""}</p>
         </div>
         ${ring(ai ? ai.match_score : qm, ai ? "AI match" : "Quick match")}
       </div>
@@ -679,16 +754,15 @@ Reply with ONLY a JSON object of this exact shape:
       <div class="row" style="gap:8px">
         <button class="btn outline" data-act="${job.live ? "keep" : "skip"}" data-id="${esc(job.id)}" style="flex:1">${job.live ? "Save" : "Skip"}</button>
         ${job.url ? `<a class="btn outline" href="${esc(job.url)}" target="_blank" rel="noopener" style="flex:1">Open ↗</a>` : ""}
-        <button class="btn ${cls === "bad" ? "" : "primary"}" data-act="draft" data-id="${esc(job.id)}" style="flex:2">${ai ? "✨ View draft" : "✨ Draft & Apply"}</button>
+        <button class="btn ${cls === "bad" ? "" : "primary"}" data-act="${ai ? "draft" : "all"}" data-id="${esc(job.id)}" style="flex:2">${ai ? "✨ View draft" : "✨ Add & do everything"}</button>
       </div>
     </article>`;
   }
 
-  function addJobFromForm() {
-    const title = $("#aTitle").value.trim(); if (!title) { toast("Give the job a title first."); $("#aTitle").focus(); return; }
-    const job = { id: "j-" + Date.now(), title, company: $("#aCompany").value.trim(), location: $("#aLocation").value.trim(), url: $("#aUrl").value.trim(), pay: $("#aPay").value.trim(), hours_per_week: $("#aHours").value ? +$("#aHours").value : null, shift_end: $("#aEnd").value || null, job_type: $("#aType").value, description: $("#aDesc").value.trim().slice(0, 6000), schedule: "", tags: [], added_at: new Date().toISOString() };
-    if (job.url && !/^https?:\/\//i.test(job.url)) job.url = "https://" + job.url;
+  function addJobFromForm(andDraft) {
+    const job = buildJobFromForm(); if (!job) return;
     state.jobs.unshift(job); save(K.jobs, state.jobs); state.showAdd = false; render();
+    if (andDraft) { doEverything(job); return; }
     const s = prescreen(job); toast(s.verdict === "approved" ? "Passes the safety check. Ready to draft." : s.verdict === "review" ? "Added. Check the flagged details before applying." : "Added, but this job is not suitable for a 16-year-old.");
   }
 
@@ -697,6 +771,7 @@ Reply with ONLY a JSON object of this exact shape:
     if (act === "more") { const d = main.querySelector(`[data-desc="${CSS.escape(id)}"]`); d.classList.toggle("open"); el.textContent = d.classList.contains("open") ? "Show less" : "Read more"; }
     else if (act === "skip") { state.skipped.push(id); save(K.skipped, state.skipped); render(); }
     else if (act === "keep") { keepJob(job); render(); toast("Saved to your list"); }
+    else if (act === "all") doEverything(job);
     else if (act === "draft") { keepJob(job); openDraft(job); }
   }
 
@@ -713,6 +788,20 @@ Reply with ONLY a JSON object of this exact shape:
     if (screen.verdict === "blocked" && a.legal.is_safe_for_16) { a.legal.is_safe_for_16 = false; a.legal.tag = "Not for 16"; a.legal.concerns = Array.from(new Set(screen.reasons.concat(a.legal.concerns))); a.recommendation = "skip"; a.match_score = Math.min(a.match_score, 30); }
     state.analyses[job.id] = Object.assign(a, { generated_at: new Date().toISOString() }); save(K.analyses, state.analyses);
     return a;
+  }
+  async function doEverything(job) {
+    keepJob(job);
+    if (!aiMode()) { toast(state.sample === null ? "Saved. Add a Claude API key in AI settings to draft automatically." : "Claude is still loading. Try again in a second."); render(); return; }
+    if (!state.analyses[job.id]) {
+      state.sheet = { jobId: job.id, phase: "thinking", text: "" }; render();
+      try { await analyze(job); } catch (e) { if (state.sheet && state.sheet.jobId === job.id) { if (e.code === "cancelled") state.sheet = null; else { state.sheet.phase = "error"; state.sheet.error = errCopy(e); } } render(); return; }
+    }
+    const a = state.analyses[job.id];
+    if (a && a.legal.is_safe_for_16 && !state.apps.some(x => x.job_id === job.id)) {
+      state.apps.unshift({ id: job.id + "-" + Date.now(), job_id: job.id, title: job.title, company: job.company, url: job.url || "", match_score: a.match_score, status: "applied", applied_at: new Date().toISOString(), notes: "Draft ready. Open the listing, send the message, then update the status here.", cv_profile: a.cv_profile, invitation_message: a.invitation_message });
+      save(K.apps, state.apps); toast("Draft ready and added to Monitor. Open the listing and send your message.");
+    } else if (a && !a.legal.is_safe_for_16) { toast("Draft ready, but this job failed the safety check, so it was not added to Monitor."); }
+    state.sheet = { jobId: job.id, phase: "done" }; render();
   }
   async function openDraft(job) {
     if (state.analyses[job.id]) { state.sheet = { jobId: job.id, phase: "done" }; render(); return; }
@@ -870,7 +959,7 @@ Reply with ONLY a JSON object of this exact shape:
   const hash = (location.hash || "").replace("#", ""); if (["finder", "cv", "monitor"].includes(hash)) state.tab = hash;
   render();
   resolveSample();
-  window.__firstshift = { prescreen, quickMatch, boardLinks, liveSearch, state }; // for checks
+  window.__firstshift = { prescreen, quickMatch, boardLinks, liveSearch, doEverything, state }; // for checks
 })();
 </script>
 </body>
