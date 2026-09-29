@@ -215,7 +215,7 @@
     analyses: load(K.analyses, {}),
     apps: load(K.apps, []),
     skipped: load(K.skipped, []),
-    search: Object.assign({ country: "us", where: "", what: "part time student" }, load(K.search, {})),
+    search: Object.assign({ country: "bg", where: "", what: "part time student" }, load(K.search, {})),
     assets: null,
     monitorFilter: "all",
     showAdd: false,
@@ -270,6 +270,16 @@
       { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.de/search?q=${q}&w=${l}` },
       { name: "Arbeitsagentur", note: "Official job search", url: (q, l) => `https://www.arbeitagentur.de/jobsuche/suche?was=${q}&wo=${l}`.replace("arbeitagentur", "arbeitsagentur") },
       { name: "Arbeitnow", note: "Student and part-time roles", url: (q) => `https://www.arbeitnow.com/?search=${q}` } ] },
+    bg: { name: "Bulgaria / България", indeed: "https://bg.indeed.com", adzuna: null,
+      rules: { latestEnd: 20 * 60, earliestStart: 6 * 60, maxTermHours: 20, maxBreakHours: 35 },
+      law: "In Bulgaria people under 18 may not work between 20:00 and 06:00, at most 7 hours a day and 35 hours a week, and the employer must hold a permit from the Labour Inspectorate (ГИТ) before hiring you.",
+      terms: ["почасова работа", "работа за ученици", "уикенд", "кафе", "промоутър", "лятна работа", "part time student"],
+      boards: [
+      { name: "Jobs.bg", note: "Най-големият сайт за работа", url: (q) => `https://www.jobs.bg/front_job_search.php?keyword=${q}` },
+      { name: "Zaplata.bg", note: "Обяви с посочена заплата", url: (q) => `https://www.zaplata.bg/search/?q=${q}` },
+      { name: "OLX Работа", note: "Почасова и сезонна работа", url: (q) => `https://www.olx.bg/rabota/q-${q.replace(/%20|\+/g, "-")}/` },
+      { name: "JobTiger", note: "Обяви от цялата страна", url: (q) => `https://www.jobtiger.bg/search/?keyword=${q}` },
+      { name: "Агенция по заетостта", note: "Официална държавна база с обяви", url: () => "https://www.az.government.bg/" } ] },
     other: { name: "Other", indeed: "https://www.indeed.com", adzuna: null, boards: [] }
   };
   const QUICK_TERMS = ["part time student", "weekend", "cafe", "retail assistant", "tutor", "summer camp", "16 year old"];
@@ -338,12 +348,16 @@
   /* ------------------------------------------------------------------ */
   /* Student-safety pre-screen (deterministic, runs before any AI call)  */
   /* ------------------------------------------------------------------ */
-  const RULES = { latestEnd: 22 * 60, earliestStart: 7 * 60, maxTermHours: 20, maxBreakHours: 40 };
+  const BASE_RULES = { latestEnd: 22 * 60, earliestStart: 7 * 60, maxTermHours: 20, maxBreakHours: 40 };
+  const country = () => COUNTRIES[state.search.country] || COUNTRIES.other;
+  const rulesFor = () => Object.assign({}, BASE_RULES, country().rules || {});
+  const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  const quickTerms = () => country().terms || QUICK_TERMS;
   const HAZARDS = ["forklift", "roofing", "scaffold", "excavat", "demolition", "meat slicer", "power saw", "chainsaw", "welding", "explosive", "firearm", "mining", "logging", "commercial driving", "delivery driver", "driving required", "driver's license required", "deep fryer", "industrial", "chemical handling", "pesticide", "bartend", "serve alcohol", "casino", "tobacco", "cannabis", "adult", "door to door", "door-to-door", "overnight", "graveyard shift", "night shift", "24/7", "on call", "must be 18", "18+", "18 or older", "21+"];
 
   function minutes(t) { const m = /^(\d{1,2}):(\d{2})$/.exec((t || "").trim()); if (!m) return null; const h = +m[1], mi = +m[2]; return (h < 24 && mi < 60) ? h * 60 + mi : null; }
   function lateTimesInText(text) {
-    const found = [];
+    const RULES = rulesFor(); const found = [];
     const re = /(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi;
     let m;
     while ((m = re.exec(text))) {
@@ -359,23 +373,23 @@
   function hoursInText(text) { const m = /(\d{1,2})\s*(?:-\s*(\d{1,2}))?\s*(?:h|hrs|hours)\s*(?:per|a|\/)\s*(?:week|wk)/i.exec(text); return m ? +(m[2] || m[1]) : null; }
 
   function prescreen(job) {
-    const reasons = []; let blocked = false, review = false;
+    const RULES = rulesFor(); const reasons = []; let blocked = false, review = false;
     const text = [job.title, job.description, job.schedule, (job.tags || []).join(" ")].join(" ").toLowerCase();
     const haz = HAZARDS.filter(h => text.includes(h));
     if (haz.length) { blocked = true; reasons.push("Restricted work or age limit mentioned: " + haz.join(", ")); }
     const end = minutes(job.shift_end);
-    if (end !== null && end > RULES.latestEnd) { blocked = true; reasons.push("Shift ends after 22:00"); }
+    if (end !== null && end > RULES.latestEnd) { blocked = true; reasons.push("Shift ends after " + hhmm(RULES.latestEnd)); }
     const start = minutes(job.shift_start);
-    if (start !== null && start < RULES.earliestStart) { blocked = true; reasons.push("Shift starts before 07:00"); }
+    if (start !== null && start < RULES.earliestStart) { blocked = true; reasons.push("Shift starts before " + hhmm(RULES.earliestStart)); }
     if (start !== null && end !== null && end <= start) { blocked = true; reasons.push("Overnight shift"); }
     if (end === null) {
       const late = lateTimesInText(text);
       if (late.length) { review = true; reasons.push("Late or early times mentioned: " + late.slice(0, 3).join(", ")); }
-      else { review = true; reasons.push("Finish time not listed. Confirm shifts end by 22:00"); }
+      else { review = true; reasons.push("Finish time not listed. Confirm shifts end by " + hhmm(RULES.latestEnd)); }
     }
     const hrs = job.hours_per_week || hoursInText(text);
     if (hrs === null || hrs === undefined || hrs === "") { review = true; reasons.push("Weekly hours not listed"); }
-    else if (hrs > RULES.maxBreakHours) { blocked = true; reasons.push(hrs + " h/week is over the limit for minors"); }
+    else if (hrs > RULES.maxBreakHours) { blocked = true; reasons.push(hrs + " h/week is over the legal limit for under-18s (" + RULES.maxBreakHours + ")"); }
     else if (hrs > RULES.maxTermHours) { review = true; reasons.push(hrs + " h/week only works in school holidays"); }
     if (/full[- ]time/.test((job.job_type || "").toLowerCase())) { blocked = true; reasons.push("Full-time roles do not fit school"); }
     if (blocked) return { verdict: "blocked", tag: "Not for 16", reasons };
@@ -408,9 +422,10 @@ SCORING (0-100): 40 pts duties vs the student's subjects/hobbies/strengths/achie
 CV PROFILE: 3-5 sentences, first person, ATS-friendly, real keywords from the ad, motivation and reliability first, subjects/hobbies/achievements as evidence. Never invent jobs, employers, certificates or years of experience. No empty cliches.
 INVITATION MESSAGE: exactly FOUR sentences to the recruiter: (1) greeting, role and where it was seen; (2) who the student is, a 16-year-old student, plus the one most relevant strength; (3) honest availability around school (after school, weekends, holidays); (4) polite confident close asking for a short chat or trial shift, with thanks. Warm, respectful, no slang, no exclamation marks, no emojis, no signature block, no placeholders like [Your Name].`;
 
+  function safetyRules() { const c = country(); const r = rulesFor(); return SAFETY_RULES + (c.law ? `\nCOUNTRY RULES (${c.name}): ${c.law} Treat these as overriding the general limits: no work outside ${hhmm(r.earliestStart)}-${hhmm(r.latestEnd)}, at most ${r.maxBreakHours} h/week.` : ""); }
   function jobPrompt(job, screen) {
     const j = Object.assign({}, job); delete j.example; delete j.id;
-    return `${SAFETY_RULES}
+    return `${safetyRules()}
 
 STUDENT PROFILE (JSON):
 ${JSON.stringify(profileForAI(), null, 1)}
@@ -422,7 +437,7 @@ Reply with ONLY a JSON object of this exact shape:
 {"match_score": 0-100 integer, "match_reasons": ["2-4 short reasons"], "legal": {"is_safe_for_16": true|false, "tag": "16+ Approved" | "Needs Review" | "Not for 16", "concerns": ["specific concerns, empty if none"], "schedule_fit": "one sentence"}, "cv_profile": "3-5 sentences", "key_skills": ["4-6 ATS keywords"], "invitation_message": "exactly 4 sentences", "recommendation": "apply" | "apply_with_caution" | "skip"}`;
   }
   function assetsPrompt() {
-    return `${SAFETY_RULES}
+    return `${safetyRules()}
 
 You are generating general application assets (not judging one job) for the role type: "${state.profile.target_role}".
 STUDENT PROFILE (JSON):
@@ -576,7 +591,8 @@ Reply with ONLY a JSON object of this exact shape:
             <label class="f">Town / postcode<input type="text" id="sWhere" value="${esc(state.search.where)}" placeholder="${esc(p.location || "e.g. Leeds")}"></label>
           </div>
           <label class="f">Search words<input type="text" id="sWhat" value="${esc(state.search.what)}"></label>
-          <div class="chips" id="quickTerms">${QUICK_TERMS.map(t => `<button type="button" data-term="${esc(t)}" class="${state.search.what === t ? "on" : ""}">${esc(t)}</button>`).join("")}</div>
+          ${country().law ? `<div class="note">🛡️ ${esc(country().law)}</div>` : ""}
+          <div class="chips" id="quickTerms">${quickTerms().map(t => `<button type="button" data-term="${esc(t)}" class="${state.search.what === t ? "on" : ""}">${esc(t)}</button>`).join("")}</div>
           <button class="btn primary wide" id="liveSearch" ${state.live && state.live.busy ? "disabled" : ""}>${state.live && state.live.busy ? "Searching…" : "🔎 Search live jobs"}</button>
           <div class="chips" id="liveStatus">${liveStatusHtml()}</div>
           <details ${state.live ? "" : "open"}><summary>Official platforms (${links.length}) ↗</summary>
