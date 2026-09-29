@@ -201,7 +201,7 @@
   /* ------------------------------------------------------------------ */
   /* Storage (per viewer, per browser)                                   */
   /* ------------------------------------------------------------------ */
-  const K = { profile: "fs.profile", jobs: "fs.jobs", analyses: "fs.analyses", apps: "fs.apps", skipped: "fs.skipped", tab: "fs.tab", search: "fs.search", apiKey: "fs.apiKey" };
+  const K = { profile: "fs.profile", jobs: "fs.jobs", analyses: "fs.analyses", apps: "fs.apps", skipped: "fs.skipped", tab: "fs.tab", search: "fs.search", apiKey: "fs.apiKey", adzunaId: "fs.adzunaId", adzunaKey: "fs.adzunaKey" };
   function load(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch (e) { return fb; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 
@@ -231,7 +231,9 @@
     showAdd: false,
     sheet: null,      // { jobId, phase: "thinking"|"done"|"error", text, error }
     sample: undefined, // undefined = not resolved yet, null = unavailable
-    apiKey: load(K.apiKey, "")
+    apiKey: load(K.apiKey, ""),
+    adzunaId: load(K.adzunaId, ""), adzunaKey: load(K.adzunaKey, ""),
+    live: null // { busy, jobs, status }
   };
 
   /* ------------------------------------------------------------------ */
@@ -247,13 +249,38 @@
   /* ------------------------------------------------------------------ */
   /* Real job boards (search links built from the student's inputs)      */
   /* ------------------------------------------------------------------ */
+  /* Every entry is an official search page of that platform; q and l are URL-encoded. */
+  const GLOBAL_BOARDS = [
+    { name: "Indeed", note: "Largest job board", url: (q, l, c) => `${c.indeed}/jobs?q=${q}&l=${l}` },
+    { name: "Google Jobs", note: "Listings from many sites", url: (q, l) => `https://www.google.com/search?q=${q}+jobs+near+${l}&ibp=htl;jobs` },
+    { name: "LinkedIn Jobs", note: "Company postings", url: (q, l) => `https://www.linkedin.com/jobs/search/?keywords=${q}&location=${l}` },
+    { name: "Glassdoor", note: "Jobs with company reviews", url: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${q}` }
+  ];
   const COUNTRIES = {
-    us: { name: "United States", indeed: "https://www.indeed.com", adzuna: "https://www.adzuna.com", extra: { name: "Snagajob", note: "Hourly and teen-friendly jobs", url: (q, l) => `https://www.snagajob.com/search?q=${q}&w=${l}` } },
-    gb: { name: "United Kingdom", indeed: "https://uk.indeed.com", adzuna: "https://www.adzuna.co.uk", extra: { name: "Reed", note: "UK part-time and weekend roles", url: (q, l) => `https://www.reed.co.uk/jobs?keywords=${q}&location=${l}` } },
-    ca: { name: "Canada", indeed: "https://ca.indeed.com", adzuna: "https://www.adzuna.ca", extra: { name: "Job Bank", note: "Government of Canada listings", url: (q, l) => `https://www.jobbank.gc.ca/jobsearch/jobsearch?searchstring=${q}&locationstring=${l}` } },
-    au: { name: "Australia", indeed: "https://au.indeed.com", adzuna: "https://www.adzuna.com.au", extra: { name: "SEEK", note: "Casual and student roles", url: (q, l) => `https://www.seek.com.au/jobs?keywords=${q}&where=${l}` } },
-    de: { name: "Germany", indeed: "https://de.indeed.com", adzuna: "https://www.adzuna.de", extra: null },
-    other: { name: "Other", indeed: "https://www.indeed.com", adzuna: null, extra: null }
+    us: { name: "United States", indeed: "https://www.indeed.com", adzuna: "us", boards: [
+      { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.com/search?q=${q}&w=${l}` },
+      { name: "Snagajob", note: "Hourly and teen-friendly jobs", url: (q, l) => `https://www.snagajob.com/search?q=${q}&w=${l}` },
+      { name: "ZipRecruiter", note: "Fast one-click applications", url: (q, l) => `https://www.ziprecruiter.com/jobs-search?search=${q}&location=${l}` },
+      { name: "SimplyHired", note: "Local part-time listings", url: (q, l) => `https://www.simplyhired.com/search?q=${q}&l=${l}` },
+      { name: "Monster", note: "Entry-level roles", url: (q, l) => `https://www.monster.com/jobs/search?q=${q}&where=${l}` } ] },
+    gb: { name: "United Kingdom", indeed: "https://uk.indeed.com", adzuna: "gb", boards: [
+      { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.co.uk/search?q=${q}&w=${l}` },
+      { name: "Reed", note: "UK part-time and weekend roles", url: (q, l) => `https://www.reed.co.uk/jobs?keywords=${q}&location=${l}` },
+      { name: "Find a job (GOV.UK)", note: "Official government job site", url: (q, l) => `https://findajob.dwp.gov.uk/search?q=${q}&w=${l}` },
+      { name: "CV-Library", note: "Local shop and cafe jobs", url: (q, l) => `https://www.cv-library.co.uk/search-jobs?q=${q}&geo=${l}` } ] },
+    ca: { name: "Canada", indeed: "https://ca.indeed.com", adzuna: "ca", boards: [
+      { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.ca/search?q=${q}&w=${l}` },
+      { name: "Job Bank", note: "Government of Canada listings", url: (q, l) => `https://www.jobbank.gc.ca/jobsearch/jobsearch?searchstring=${q}&locationstring=${l}` },
+      { name: "SimplyHired", note: "Local part-time listings", url: (q, l) => `https://www.simplyhired.ca/search?q=${q}&l=${l}` } ] },
+    au: { name: "Australia", indeed: "https://au.indeed.com", adzuna: "au", boards: [
+      { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.com.au/search?q=${q}&w=${l}` },
+      { name: "SEEK", note: "Casual and student roles", url: (q, l) => `https://www.seek.com.au/jobs?keywords=${q}&where=${l}` },
+      { name: "Jora", note: "Aggregated local listings", url: (q, l) => `https://au.jora.com/j?q=${q}&l=${l}` } ] },
+    de: { name: "Germany", indeed: "https://de.indeed.com", adzuna: "de", boards: [
+      { name: "Adzuna", note: "Aggregates local ads", url: (q, l) => `https://www.adzuna.de/search?q=${q}&w=${l}` },
+      { name: "Arbeitsagentur", note: "Official job search", url: (q, l) => `https://www.arbeitagentur.de/jobsuche/suche?was=${q}&wo=${l}`.replace("arbeitagentur", "arbeitsagentur") },
+      { name: "Arbeitnow", note: "Student and part-time roles", url: (q) => `https://www.arbeitnow.com/?search=${q}` } ] },
+    other: { name: "Other", indeed: "https://www.indeed.com", adzuna: null, boards: [] }
   };
   const QUICK_TERMS = ["part time student", "weekend", "cafe", "retail assistant", "tutor", "summer camp", "16 year old"];
 
@@ -261,13 +288,61 @@
     const c = COUNTRIES[state.search.country] || COUNTRIES.other;
     const q = encodeURIComponent(state.search.what || "part time student");
     const l = encodeURIComponent(state.search.where || state.profile.location || "");
-    const out = [
-      { name: "Indeed", note: "Largest job board", url: `${c.indeed}/jobs?q=${q}&l=${l}` },
-      { name: "Google Jobs", note: "Listings from many sites", url: `https://www.google.com/search?q=${q}+jobs+near+${l}&ibp=htl;jobs` }
-    ];
-    if (c.adzuna) out.push({ name: "Adzuna", note: "Aggregates local ads", url: `${c.adzuna}/search?q=${q}&w=${l}` });
-    if (c.extra) out.push({ name: c.extra.name, note: c.extra.note, url: c.extra.url(q, l) });
-    return out;
+    return GLOBAL_BOARDS.concat(c.boards).map(b => ({ name: b.name, note: b.note, url: b.url(q, l, c) }));
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* In-app live search across public job APIs (works on normal hosting; */
+  /* inside the Claude viewer the browser blocks outside requests and   */
+  /* the links above are the fallback).                                  */
+  /* ------------------------------------------------------------------ */
+  const STUDENT_TERMS = ["part-time", "part time", "weekend", "student", "junior", "trainee", "intern", "seasonal", "summer", "holiday", "saturday", "sunday", "casual", "minijob", "werkstudent", "aushilfe", "cafe", "café", "barista", "retail", "shop assistant", "sales assistant", "tutor", "camp", "lifeguard", "library", "crew member", "team member", "helper", "assistant", "no experience", "entry level", "entry-level", "school leaver"];
+  const stripHtml = (h, limit) => { const d = document.createElement("div"); d.innerHTML = String(h || "").replace(/<br\s*\/?>|<\/p>|<\/li>/gi, "\n"); return (d.textContent || "").replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim().slice(0, limit || 1200); };
+  const studentFriendly = (...parts) => { const b = parts.join(" ").toLowerCase(); return STUDENT_TERMS.some(t => b.includes(t)); };
+  const kind = (t) => { const b = t.toLowerCase(); return /intern/.test(b) ? "Internship" : /(seasonal|summer|holiday)/.test(b) ? "Seasonal" : /(weekend|saturday|sunday)/.test(b) ? "Weekend" : /full[- ]?time|vollzeit/.test(b) ? "Full-time" : "Part-time"; };
+  const hashId = (src, u) => { let h = 0; for (const ch of String(u)) h = (h * 31 + ch.charCodeAt(0)) | 0; return `${src}-${(h >>> 0).toString(36)}`; };
+  function mkJob(src, unique, title, company, location, description, url, extra) {
+    const desc = stripHtml(description); const blob = `${title} ${desc}`;
+    const hrs = /(\d{1,2})\s*(?:-\s*(\d{1,2}))?\s*(?:h|hrs|hours|stunden)\s*(?:per|a|\/|pro)\s*(?:week|wk|woche)/i.exec(blob);
+    return Object.assign({ id: hashId(src, unique), source: src, live: true, title: String(title || "").slice(0, 120), company: String(company || "").slice(0, 80), location: String(location || "").slice(0, 80), pay: "", schedule: "", hours_per_week: hrs ? +(hrs[2] || hrs[1]) : null, shift_end: null, job_type: kind(blob), description: desc, tags: [], url: url || "" }, extra || {});
+  }
+  async function getJson(url, signal) { const r = await fetch(url, { signal, headers: { Accept: "application/json" } }); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+  const LIVE_SOURCES = {
+    adzuna: { name: "Adzuna", needsKey: true, run: async (q, l, c, signal) => {
+      if (!state.adzunaId || !state.adzunaKey || !c.adzuna) throw new Error("no key");
+      const d = await getJson(`https://api.adzuna.com/v1/api/jobs/${c.adzuna}/search/1?app_id=${encodeURIComponent(state.adzunaId)}&app_key=${encodeURIComponent(state.adzunaKey)}&results_per_page=30&part_time=1&what=${q}${l ? "&where=" + l : ""}&content-type=application/json`, signal);
+      return (d.results || []).map(j => mkJob("adzuna", j.id, j.title, j.company && j.company.display_name, j.location && j.location.display_name, j.description, j.redirect_url, { pay: j.salary_min ? Math.round(j.salary_min).toLocaleString() + " / year" : "", schedule: j.contract_time || "", tags: [j.category && j.category.label].filter(Boolean) })); } },
+    arbeitnow: { name: "Arbeitnow", run: async (q, l, c, signal) => { const d = await getJson("https://www.arbeitnow.com/api/job-board-api?page=1", signal); const qq = decodeURIComponent(q).toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      return (d.data || []).filter(j => studentFriendly(j.title, (j.job_types || []).join(" "), (j.tags || []).join(" "), (j.description || "").slice(0, 2000)) || qq.some(w => (j.title || "").toLowerCase().includes(w)))
+        .map(j => mkJob("arbeitnow", j.slug || j.url, j.title, j.company_name, (j.location || "") + (j.remote ? " (remote)" : ""), j.description, j.url, { schedule: (j.job_types || []).join(", "), tags: (j.job_types || []).concat(j.tags || []).slice(0, 6) })); } },
+    themuse: { name: "The Muse", run: async (q, l, c, signal) => { const d = await getJson(`https://www.themuse.com/api/public/jobs?page=1&level=Internship&descending=true${l ? "&location=" + l : ""}`, signal);
+      return (d.results || []).map(j => mkJob("themuse", j.id, j.name, j.company && j.company.name, (j.locations || []).slice(0, 2).map(x => x.name).join(", "), j.contents, j.refs && j.refs.landing_page, { tags: (j.categories || []).map(x => x.name).slice(0, 4) })); } },
+    jobicy: { name: "Jobicy", run: async (q, l, c, signal) => { const d = await getJson(`https://jobicy.com/api/v2/remote-jobs?count=30&tag=${q}`, signal);
+      return (d.jobs || []).filter(j => studentFriendly(j.jobTitle, Array.isArray(j.jobType) ? j.jobType.join(" ") : String(j.jobType || ""), j.jobLevel, j.jobExcerpt)).map(j => mkJob("jobicy", j.id, j.jobTitle, j.companyName, j.jobGeo || "Remote", j.jobDescription || j.jobExcerpt, j.url, { schedule: Array.isArray(j.jobType) ? j.jobType.join(", ") : String(j.jobType || ""), tags: (j.jobIndustry || []).slice(0, 4) })); } },
+    remotive: { name: "Remotive", run: async (q, l, c, signal) => { const d = await getJson(`https://remotive.com/api/remote-jobs?limit=60&search=${q}`, signal);
+      return (d.jobs || []).filter(j => studentFriendly(j.title, j.job_type, j.category, (j.description || "").slice(0, 2000))).map(j => mkJob("remotive", j.id, j.title, j.company_name, j.candidate_required_location || "Remote", j.description, j.url, { pay: j.salary || "", schedule: j.job_type || "", tags: [j.category].concat(j.tags || []).filter(Boolean).slice(0, 5) })); } }
+  };
+  let liveCtl = null;
+  async function liveSearch() {
+    if (liveCtl) liveCtl.abort(); const c = new AbortController(); liveCtl = c;
+    const country = COUNTRIES[state.search.country] || COUNTRIES.other;
+    const q = encodeURIComponent(state.search.what || "part time student"); const l = encodeURIComponent(state.search.where || state.profile.location || "");
+    state.live = { busy: true, jobs: [], status: {} }; render();
+    const names = Object.keys(LIVE_SOURCES).filter(n => !LIVE_SOURCES[n].needsKey || (state.adzunaId && state.adzunaKey));
+    names.forEach(n => { state.live.status[n] = "searching"; });
+    await Promise.all(names.map(async n => {
+      try { const jobs = await LIVE_SOURCES[n].run(q, l, country, c.signal); if (c.signal.aborted) return; state.live.status[n] = jobs.length + " found"; state.live.jobs = state.live.jobs.concat(jobs); }
+      catch (e) { if (c.signal.aborted) return; state.live.status[n] = (e && /Failed to fetch|NetworkError|blocked|CSP/i.test(String(e.message || e))) ? "blocked in this viewer" : "no answer"; }
+      if (!c.signal.aborted) { const seen = new Set(); state.live.jobs = state.live.jobs.filter(j => { const k = (j.title + "|" + j.company).toLowerCase(); if (seen.has(k) || !j.title) return false; seen.add(k); return true; }); renderLiveStatus(); }
+    }));
+    if (c.signal.aborted) return;
+    state.live.busy = false; render();
+    const n = state.live.jobs.length; toast(n ? `${n} live job${n === 1 ? "" : "s"} found` : "No live results here. Use the platform links below.");
+  }
+  function renderLiveStatus() { const el = $("#liveStatus"); if (el) el.innerHTML = liveStatusHtml(); }
+  function liveStatusHtml() {
+    if (!state.live) return "";
+    return Object.keys(state.live.status).map(n => { const st = state.live.status[n]; const cls = /found/.test(st) && !/^0 /.test(st) ? "good" : /searching/.test(st) ? "plain" : "warn"; return `<span class="tag ${cls}">${esc(LIVE_SOURCES[n].name)}: ${esc(st)}</span>`; }).join("");
   }
 
   /* ------------------------------------------------------------------ */
@@ -455,10 +530,12 @@ Reply with ONLY a JSON object of this exact shape:
   }
   const tagClass = v => v === "approved" || /approved/i.test(v) ? "good" : (v === "review" || /review/i.test(v) ? "warn" : "bad");
 
-  function allJobs() { return state.jobs.concat(EXAMPLES); }
+  function allJobs() { const ids = new Set(state.jobs.map(j => j.id)); const live = state.live ? state.live.jobs.filter(j => !ids.has(j.id)) : []; return state.jobs.concat(live, EXAMPLES); }
+  function keepJob(job) { if (job.live && !state.jobs.some(j => j.id === job.id)) { const copy = Object.assign({}, job); delete copy.live; copy.added_at = new Date().toISOString(); state.jobs.unshift(copy); save(K.jobs, state.jobs); } }
   function visibleJobs() {
     return allJobs().filter(j => !state.skipped.includes(j.id)).map(j => ({ job: j, screen: prescreen(j), qm: quickMatch(j), ai: state.analyses[j.id] }))
-      .sort((a, b) => { const ra = a.screen.verdict === "blocked" ? 2 : a.screen.verdict === "review" ? 1 : 0, rb = b.screen.verdict === "blocked" ? 2 : b.screen.verdict === "review" ? 1 : 0; if (a.job.example !== b.job.example) return a.job.example ? 1 : -1; if (ra !== rb) return ra - rb; return (b.ai ? b.ai.match_score : b.qm) - (a.ai ? a.ai.match_score : a.qm); });
+      .filter(x => !(x.job.live && x.screen.verdict === "blocked"))
+      .sort((a, b) => { const ra = a.screen.verdict === "blocked" ? 2 : a.screen.verdict === "review" ? 1 : 0, rb = b.screen.verdict === "blocked" ? 2 : b.screen.verdict === "review" ? 1 : 0; if (!!a.job.example !== !!b.job.example) return a.job.example ? 1 : -1; if (ra !== rb) return ra - rb; return (b.ai ? b.ai.match_score : b.qm) - (a.ai ? a.ai.match_score : a.qm); });
   }
 
   function render() {
@@ -476,16 +553,22 @@ Reply with ONLY a JSON object of this exact shape:
     return `<div class="note warn">AI scoring, CV and message writing are off. The safety check, job links and tracker still work. Add a Claude API key in <b>AI settings</b> below, or open this page inside Claude.</div>`;
   }
   function aiSettingsCard() {
-    if (state.sample !== null) return "";
-    return `<section class="card stack"><details ${state.apiKey ? "" : "open"}><summary>⚙️ AI settings ${state.apiKey ? "· key saved" : ""}</summary>
+    const ai = state.sample === null ? `<details ${state.apiKey ? "" : "open"}><summary>⚙️ AI settings ${state.apiKey ? "· key saved" : ""}</summary>
       <p class="small muted" style="margin:8px 0">For the person running this site: paste an Anthropic API key from console.anthropic.com. It is stored only in this browser and sent only to api.anthropic.com. Usage is billed to that key.</p>
       <div class="row" style="flex-wrap:nowrap"><input type="password" id="apiKeyIn" placeholder="sk-ant-…" value="${esc(state.apiKey)}" style="flex:1" autocomplete="off"><button class="btn sm primary" id="apiKeySave">Save</button>${state.apiKey ? `<button class="btn sm outline" id="apiKeyClear">Remove</button>` : ""}</div>
-    </details></section>`;
+    </details>` : "";
+    const adz = `<details ${state.adzunaKey ? "" : ""}><summary>🗺️ Local job search (Adzuna) ${state.adzunaKey ? "· key saved" : ""}</summary>
+      <p class="small muted" style="margin:8px 0">Adzuna returns real listings near your town in 16+ countries. Get a free app ID and key at developer.adzuna.com, paste them here (stored only in this browser).</p>
+      <div class="grid2"><input type="text" id="adzId" placeholder="App ID" value="${esc(state.adzunaId)}" autocomplete="off"><input type="password" id="adzKey" placeholder="App key" value="${esc(state.adzunaKey)}" autocomplete="off"></div>
+      <div class="row" style="margin-top:6px"><button class="btn sm primary" id="adzSave">Save</button>${state.adzunaKey ? `<button class="btn sm outline" id="adzClear">Remove</button>` : ""}</div>
+    </details>`;
+    return `<section class="card stack">${ai}${adz}</section>`;
   }
   function bindAiSettings() {
-    const save_ = $("#apiKeySave"); if (!save_) return;
-    save_.onclick = () => { state.apiKey = $("#apiKeyIn").value.trim(); save(K.apiKey, state.apiKey); render(); toast(state.apiKey ? "Key saved in this browser" : "Key removed"); };
+    const save_ = $("#apiKeySave"); if (save_) save_.onclick = () => { state.apiKey = $("#apiKeyIn").value.trim(); save(K.apiKey, state.apiKey); render(); toast(state.apiKey ? "Key saved in this browser" : "Key removed"); };
     const clr = $("#apiKeyClear"); if (clr) clr.onclick = () => { state.apiKey = ""; save(K.apiKey, ""); render(); };
+    const az = $("#adzSave"); if (az) az.onclick = () => { state.adzunaId = $("#adzId").value.trim(); state.adzunaKey = $("#adzKey").value.trim(); save(K.adzunaId, state.adzunaId); save(K.adzunaKey, state.adzunaKey); render(); toast(state.adzunaKey ? "Adzuna key saved. Search again." : "Adzuna key removed"); };
+    const azc = $("#adzClear"); if (azc) azc.onclick = () => { state.adzunaId = ""; state.adzunaKey = ""; save(K.adzunaId, ""); save(K.adzunaKey, ""); render(); };
   }
 
   function renderFinder() {
@@ -495,8 +578,8 @@ Reply with ONLY a JSON object of this exact shape:
       ${aiBanner()}
       ${profileEmpty ? `<div class="note">Add your subjects and hobbies in <b>CV &amp; Invite</b> to unlock personalised match scores.</div>` : ""}
       <section class="card">
-        <h2>Search real job sites</h2>
-        <p class="small muted" style="margin-bottom:10px">Opens live listings near you in a new tab. Found one? Paste it below and FirstShift checks it and writes your application.</p>
+        <h2>Search the job platforms</h2>
+        <p class="small muted" style="margin-bottom:10px">Pick your country and town, then search. Live results appear below as cards; every official platform is also one tap away.</p>
         <div class="stack">
           <div class="grid2">
             <label class="f">Country<select id="sCountry">${Object.keys(COUNTRIES).map(k => `<option value="${k}" ${state.search.country === k ? "selected" : ""}>${COUNTRIES[k].name}</option>`).join("")}</select></label>
@@ -504,7 +587,11 @@ Reply with ONLY a JSON object of this exact shape:
           </div>
           <label class="f">Search words<input type="text" id="sWhat" value="${esc(state.search.what)}"></label>
           <div class="chips" id="quickTerms">${QUICK_TERMS.map(t => `<button type="button" data-term="${esc(t)}" class="${state.search.what === t ? "on" : ""}">${esc(t)}</button>`).join("")}</div>
-          <div class="boards">${links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener"><b>${esc(l.name)} ↗</b><span>${esc(l.note)}</span></a>`).join("")}</div>
+          <button class="btn primary wide" id="liveSearch" ${state.live && state.live.busy ? "disabled" : ""}>${state.live && state.live.busy ? "Searching…" : "🔎 Search live jobs"}</button>
+          <div class="chips" id="liveStatus">${liveStatusHtml()}</div>
+          <details ${state.live ? "" : "open"}><summary>Official platforms (${links.length}) ↗</summary>
+            <div class="boards" style="margin-top:8px">${links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener"><b>${esc(l.name)} ↗</b><span>${esc(l.note)}</span></a>`).join("")}</div>
+          </details>
         </div>
       </section>
 
@@ -543,6 +630,8 @@ Reply with ONLY a JSON object of this exact shape:
     $("#sWhere").oninput = e => { state.search.where = e.target.value; save(K.search, state.search); refreshBoards(); };
     $("#sWhat").oninput = e => { state.search.what = e.target.value; save(K.search, state.search); refreshBoards(); };
     $("#quickTerms").onclick = e => { const b = e.target.closest("button[data-term]"); if (!b) return; state.search.what = b.dataset.term; save(K.search, state.search); render(); };
+    $("#liveSearch").onclick = liveSearch;
+    $("#sWhat").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); liveSearch(); } };
     $("#toggleAdd").onclick = () => { state.showAdd = !state.showAdd; render(); if (state.showAdd) $("#aTitle").focus(); };
     if (state.showAdd) $("#saveJob").onclick = addJobFromForm;
     const un = $("#unskip"); if (un) un.onclick = () => { state.skipped = []; save(K.skipped, state.skipped); render(); };
@@ -557,7 +646,7 @@ Reply with ONLY a JSON object of this exact shape:
     return `<article class="job" id="job-${esc(job.id)}">
       <div class="head">
         <div class="info">
-          <div class="row"><span class="tag ${cls}">🛡️ ${esc(tag)}</span><span class="tag plain">${esc(job.job_type || "Part-time")}</span>${job.example ? `<span class="tag plain">Example</span>` : ""}</div>
+          <div class="row"><span class="tag ${cls}">🛡️ ${esc(tag)}</span><span class="tag plain">${esc(job.job_type || "Part-time")}</span>${job.example ? `<span class="tag plain">Example</span>` : ""}${job.source ? `<span class="tag plain">${esc(LIVE_SOURCES[job.source] ? LIVE_SOURCES[job.source].name : job.source)}</span>` : ""}</div>
           <h3>${esc(job.title)}</h3>
           <p class="company">${esc(job.company || "Company not given")}${job.location ? ` · ${esc(job.location)}` : ""}</p>
         </div>
@@ -572,7 +661,7 @@ Reply with ONLY a JSON object of this exact shape:
       ${ai ? `<div class="reasons ${ai.match_score >= 75 ? "good" : ai.match_score >= 50 ? "warn" : "bad"}"><b>Why ${ai.match_score}%</b><ul>${ai.match_reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul></div>` : ""}
       ${reasons.length ? `<div class="reasons ${cls}">⚠️ ${reasons.map(esc).join(" · ")}</div>` : ""}
       <div class="row" style="gap:8px">
-        <button class="btn outline" data-act="skip" data-id="${esc(job.id)}" style="flex:1">Skip</button>
+        <button class="btn outline" data-act="${job.live ? "keep" : "skip"}" data-id="${esc(job.id)}" style="flex:1">${job.live ? "Save" : "Skip"}</button>
         ${job.url ? `<a class="btn outline" href="${esc(job.url)}" target="_blank" rel="noopener" style="flex:1">Open ↗</a>` : ""}
         <button class="btn ${cls === "bad" ? "" : "primary"}" data-act="draft" data-id="${esc(job.id)}" style="flex:2">${ai ? "✨ View draft" : "✨ Draft & Apply"}</button>
       </div>
@@ -591,7 +680,8 @@ Reply with ONLY a JSON object of this exact shape:
     const job = allJobs().find(j => j.id === id); if (!job) return;
     if (act === "more") { const d = main.querySelector(`[data-desc="${CSS.escape(id)}"]`); d.classList.toggle("open"); el.textContent = d.classList.contains("open") ? "Show less" : "Read more"; }
     else if (act === "skip") { state.skipped.push(id); save(K.skipped, state.skipped); render(); }
-    else if (act === "draft") openDraft(job);
+    else if (act === "keep") { keepJob(job); render(); toast("Saved to your list"); }
+    else if (act === "draft") { keepJob(job); openDraft(job); }
   }
 
   /* ------------------------------------------------------------------ */
@@ -764,7 +854,7 @@ Reply with ONLY a JSON object of this exact shape:
   const hash = (location.hash || "").replace("#", ""); if (["finder", "cv", "monitor"].includes(hash)) state.tab = hash;
   render();
   resolveSample();
-  window.__firstshift = { prescreen, quickMatch, boardLinks, state }; // for checks
+  window.__firstshift = { prescreen, quickMatch, boardLinks, liveSearch, state }; // for checks
 })();
 </script>
 </body>
